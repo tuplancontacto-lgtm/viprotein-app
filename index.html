@@ -5,8 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ViProtein — Panel de Vendedor</title>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
+<script>emailjs.init('hhr4WAtA_iTcPoAgn');</script>
 <style>
-  
   :root {
     --bg: #0f0e0c;
     --surface: #1a1815;
@@ -151,7 +152,6 @@
   .stat-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
   .stat-value { font-family: var(--font-display); font-size: 30px; color: var(--text); }
   .stat-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; font-family: var(--font-mono); }
-
 
   /* FORMS */
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
@@ -797,6 +797,10 @@
         <input type="text" id="cfg-vendedor" placeholder="Tu nombre">
       </div>
       <div class="form-group">
+        <label>RUT del Vendedor</label>
+        <input type="text" id="cfg-rut" placeholder="12.345.678-9" oninput="formatRUT(this)">
+      </div>
+      <div class="form-group">
         <label>Email del Vendedor</label>
         <input type="email" id="cfg-email" placeholder="vendedor@viprotein.cl">
       </div>
@@ -830,6 +834,8 @@
     </div>
     <div class="modal-footer-btns flex gap-2 mt-4">
       <button class="btn btn-primary" onclick="window.print()">🖨️ Imprimir</button>
+      <button class="btn btn-success" onclick="enviarEmail()" id="btn-email">📧 Enviar Email</button>
+      <button class="btn btn-secondary" style="background:#25D366;color:#fff;border:none" onclick="enviarWhatsapp()">💬 WhatsApp</button>
       <button class="btn btn-secondary" onclick="closeOC()">Cerrar</button>
     </div>
   </div>
@@ -938,6 +944,7 @@ function loadConfig() {
     config = JSON.parse(localStorage.getItem('vp_config') || '{}');
     if(config.vendedor) {
       document.getElementById('cfg-vendedor').value = config.vendedor || '';
+      document.getElementById('cfg-rut').value = config.rut || '';
       document.getElementById('cfg-email').value = config.email || '';
       document.getElementById('cfg-telefono').value = config.telefono || '';
       document.getElementById('cfg-zona').value = config.zona || '';
@@ -1459,7 +1466,6 @@ function generarOrden() {
   const cid = document.getElementById('venta-cliente').value;
   if(!cid) { notif('⚠️ Selecciona un cliente'); return; }
   if(!currentItems.length) { notif('⚠️ Agrega al menos un producto'); return; }
-  // Guardar primero
   const c = clientes.find(x=>x.id===cid);
   const neto = currentItems.reduce((a,i)=>a+i.subtotal,0);
   const iva = Math.round(neto*0.19);
@@ -1476,17 +1482,25 @@ function generarOrden() {
     estado: document.getElementById('venta-estado').value,
     dirEntrega: document.getElementById('venta-dir-entrega').value || c.direccion,
     obs: document.getElementById('venta-obs').value,
-    items: [...currentItems], neto, iva, total
+    items: [...currentItems], neto, iva, total,
+    vendedor_nombre: config.vendedor || '—',
+    vendedor_rut: config.rut || '—',
   };
   pedidos.push(pedido);
   oc_counter++;
   saveData();
   renderDashboard();
+  // Guardar en MongoDB
+  guardarPedidoEnMongo(pedido);
   showOC(pedido);
   limpiarVenta();
 }
 
 function showOC(p) {
+  ocActual = p;
+  // Reset email button
+  const btn = document.getElementById('btn-email');
+  if(btn) { btn.textContent = '📧 Enviar Email'; btn.disabled = false; }
   const pagoMap = {transferencia:'Transferencia Bancaria',efectivo:'Efectivo',debito:'Débito',credito:'Crédito',cheque:'Cheque',credito_cliente:'Crédito Cliente'};
   document.getElementById('oc-print').innerHTML = `
     <div class="oc-header">
@@ -1523,6 +1537,7 @@ function showOC(p) {
           <div class="info-item"><strong>Estado:</strong> ${p.estado}</div>
           <div class="info-item" style="grid-column:1/-1"><strong>Dir. Entrega:</strong> ${p.dirEntrega||'—'}</div>
           <div class="info-item"><strong>Vendedor:</strong> ${config.vendedor||'—'}</div>
+          <div class="info-item"><strong>RUT Vendedor:</strong> ${config.rut||'—'}</div>
           <div class="info-item"><strong>Contacto:</strong> ${config.telefono||'—'}</div>
         </div>
       </div>
@@ -1638,6 +1653,7 @@ function cambiarEstado(id, estado) {
 function guardarConfig() {
   config = {
     vendedor: v('cfg-vendedor'),
+    rut: v('cfg-rut'),
     email: v('cfg-email'),
     telefono: v('cfg-telefono'),
     zona: v('cfg-zona')
@@ -1673,67 +1689,168 @@ function formatRUT(input) {
 }
 
 // =====================
+// GUARDAR PEDIDO EN MONGODB
+// =====================
+async function guardarPedidoEnMongo(pedido) {
+  try {
+    await fetch(`${BACKEND_URL}/api/viprotein/pedidos/guardar`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pedido)
+    });
+    console.log('✅ Pedido guardado en MongoDB');
+  } catch(e) {
+    console.warn('⚠️ No se pudo guardar en MongoDB:', e);
+  }
+}
+
+// =====================
+// EMAIL & WHATSAPP
+// =====================
+let ocActual = null; // guarda la OC actual para enviar
+
+async function enviarEmail() {
+  if(!ocActual) { notif('⚠️ No hay OC activa'); return; }
+  const btn = document.getElementById('btn-email');
+  btn.textContent = '⏳ Enviando...';
+  btn.disabled = true;
+
+  const productosTexto = ocActual.items.map(i =>
+    `• ${i.nombre} — ${i.tierLabel} x${i.qty} = $${fmt(i.subtotal)}`
+  ).join('\n');
+
+  try {
+    await emailjs.send('service_y11w99b', 'xf2dxog', {
+      oc_numero:         ocActual.oc,
+      fecha:             new Date().toLocaleDateString('es-CL'),
+      vendedor_nombre:   config.vendedor || '—',
+      vendedor_rut:      config.rut || '—',
+      cliente_nombre:    ocActual.clienteNombre,
+      cliente_rut:       ocActual.clienteRut,
+      cliente_direccion: ocActual.clienteDireccion || '—',
+      cliente_comuna:    ocActual.clienteComuna || '—',
+      cliente_telefono:  ocActual.clienteTelefono || '—',
+      productos:         productosTexto,
+      neto:              '$' + fmt(ocActual.neto),
+      iva:               '$' + fmt(ocActual.iva),
+      total:             '$' + fmt(ocActual.total),
+      observaciones:     ocActual.obs || 'Sin observaciones'
+    });
+    notif('✅ Email enviado correctamente');
+    btn.textContent = '✅ Email enviado';
+  } catch(e) {
+    console.error(e);
+    notif('❌ Error al enviar email');
+    btn.textContent = '📧 Enviar Email';
+    btn.disabled = false;
+  }
+}
+
+function enviarWhatsapp() {
+  if(!ocActual) { notif('⚠️ No hay OC activa'); return; }
+
+  const productosTexto = ocActual.items.map(i =>
+    `  • ${i.nombre} ${i.tierLabel} x${i.qty} = $${fmt(i.subtotal)}`
+  ).join('\n');
+
+  const msg =
+`📦 *NUEVA ORDEN DE COMPRA — VIPROTEIN*
+*OC N°:* ${ocActual.oc}
+*Fecha:* ${new Date().toLocaleDateString('es-CL')}
+
+👤 *VENDEDOR*
+Nombre: ${config.vendedor || '—'}
+RUT: ${config.rut || '—'}
+
+🏪 *CLIENTE*
+Nombre: ${ocActual.clienteNombre}
+RUT: ${ocActual.clienteRut}
+Dirección: ${ocActual.clienteDireccion || '—'}, ${ocActual.clienteComuna || '—'}
+Teléfono: ${ocActual.clienteTelefono || '—'}
+
+🛒 *PRODUCTOS*
+${productosTexto}
+
+💰 *TOTALES*
+Neto: $${fmt(ocActual.neto)}
+IVA 19%: $${fmt(ocActual.iva)}
+*TOTAL: $${fmt(ocActual.total)}*
+
+📝 *Observaciones:* ${ocActual.obs || 'Sin observaciones'}`;
+
+  const numero = '56926196096';
+  window.open(`https://wa.me/${numero}?text=${encodeURIComponent(msg)}`, '_blank');
+}
+
+// =====================
 // SISTEMA DE LICENCIA
 // =====================
+const BACKEND_URL = 'https://colmena-backend-v2-production.up.railway.app';
 
-// ┌─────────────────────────────────────────────┐
-// │  CAMBIA SOLO ESTA FECHA para cada cliente   │
-// │  Formato: AÑO, MES-1, DIA                  │
-// │  Ej: 10 días → suma 10 al día de hoy       │
-// └─────────────────────────────────────────────┘
-const FECHA_VENCIMIENTO = new Date(2026, 3, 27); // ← 27 Abril 2026 (mes va de 0 a 11)
+async function checkLicencia() {
+  // Obtener slug desde la URL → ej: /maria-gonzalez
+  const slug = window.location.pathname.replace('/', '').split('/')[0];
 
-function checkLicencia() {
-  const ahora = new Date();
-  const diasRestantes = Math.ceil((FECHA_VENCIMIENTO - ahora) / (1000 * 60 * 60 * 24));
-
-  if (ahora > FECHA_VENCIMIENTO) {
-    mostrarBloqueo('vencida');
+  if (!slug || slug === '' || slug === 'index.html') {
+    mostrarBloqueo('sin-acceso', 'No se indicó un vendedor en la URL.');
     return false;
   }
 
-  // Aviso cuando quedan 3 días o menos
-  if (diasRestantes <= 3) {
-    setTimeout(() => {
-      notif(`⚠️ Tu acceso vence en ${diasRestantes} día(s). Contáctanos para renovar.`);
-    }, 2000);
-  }
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/viprotein/${slug}`);
+    const data = await res.json();
 
-  return true;
+    if (!data.valid) {
+      const vencida = data.error && data.error.toLowerCase().includes('expir');
+      mostrarBloqueo(vencida ? 'vencida' : 'inactiva', data.error);
+      return false;
+    }
+
+    // Registrar acceso
+    fetch(`${BACKEND_URL}/api/viprotein/${slug}/registrar-acceso`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({})
+    }).catch(()=>{});
+
+    // Aviso si quedan pocos días
+    if (data.dias_restantes <= 3) {
+      setTimeout(() => {
+        notif(`⚠️ Tu acceso vence en ${data.dias_restantes} día(s). Contacta a ViProtein.`);
+      }, 2500);
+    }
+
+    // Guardar nombre del vendedor
+    if (data.vendedor?.nombre) {
+      document.getElementById('vendor-name-badge').textContent = 'Vendedor: ' + data.vendedor.nombre;
+    }
+
+    return true;
+
+  } catch(e) {
+    // Si el backend no responde, permitir acceso para no bloquear por error de red
+    console.warn('No se pudo verificar licencia:', e);
+    return true;
+  }
 }
 
-function mostrarBloqueo(tipo) {
+function mostrarBloqueo(tipo, razon) {
+  const cfg = {
+    'vencida':    { icon:'⏰', titulo:'Período de acceso finalizado',   texto: 'Tu licencia de uso ha vencido.', sub:'Renueva con ViProtein para seguir usando la app.' },
+    'inactiva':   { icon:'🚫', titulo:'Acceso no disponible',           texto: razon || 'Tu acceso ha sido desactivado.', sub:'Contacta a ViProtein para más información.' },
+    'sin-acceso': { icon:'🔒', titulo:'Acceso restringido',             texto: razon || 'Esta app requiere una URL personalizada.', sub:'Solicita tu acceso a ViProtein.' },
+  };
+  const m = cfg[tipo] || cfg['inactiva'];
   document.body.innerHTML = `
-    <div style="
-      min-height:100vh;display:flex;align-items:center;justify-content:center;
-      background:#0f0e0c;font-family:'DM Sans',sans-serif;padding:20px;
-    ">
-      <div style="
-        background:#1a1815;border:1px solid #2e2b27;border-radius:20px;
-        padding:48px 40px;max-width:480px;width:100%;text-align:center;
-      ">
-        <div style="font-family:'Bebas Neue',sans-serif;font-size:40px;color:#f5a623;margin-bottom:4px">
-          VIPROTEIN
-        </div>
-        <div style="font-size:11px;color:#4a4642;letter-spacing:3px;text-transform:uppercase;margin-bottom:36px">
-          App de Ventas
-        </div>
-        <div style="font-size:52px;margin-bottom:16px">⏰</div>
-        <div style="font-size:22px;font-weight:700;color:#f0ece4;margin-bottom:12px">
-          Período de prueba finalizado
-        </div>
-        <div style="font-size:15px;color:#8a8278;line-height:1.6;margin-bottom:8px">
-          Tu acceso de demostración ha vencido el<br>
-          <strong style="color:#f5a623">${FECHA_VENCIMIENTO.toLocaleDateString('es-CL',{day:'2-digit',month:'long',year:'numeric'})}</strong>
-        </div>
-        <div style="font-size:13px;color:#4a4642;margin-bottom:36px">
-          Adquiere la licencia completa para seguir usando la app.
-        </div>
-        <div style="
-          background:#242220;border:1px solid rgba(245,166,35,.2);border-radius:10px;
-          padding:18px;font-size:14px;color:#8a8278;line-height:1.8;
-        ">
-          📲 Contáctanos para activar tu licencia<br>
+    <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0f0e0c;font-family:'DM Sans',sans-serif;padding:20px">
+      <div style="background:#1a1815;border:1px solid #2e2b27;border-radius:20px;padding:48px 40px;max-width:460px;width:100%;text-align:center">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:40px;color:#f5a623;margin-bottom:4px">VIPROTEIN</div>
+        <div style="font-size:11px;color:#4a4642;letter-spacing:3px;text-transform:uppercase;margin-bottom:36px">App de Ventas</div>
+        <div style="font-size:52px;margin-bottom:16px">${m.icon}</div>
+        <div style="font-size:22px;font-weight:700;color:#f0ece4;margin-bottom:10px">${m.titulo}</div>
+        <div style="font-size:14px;color:#8a8278;line-height:1.7;margin-bottom:6px">${m.texto}</div>
+        <div style="font-size:12px;color:#4a4642;margin-bottom:32px">${m.sub}</div>
+        <div style="background:#242220;border:1px solid rgba(245,166,35,.2);border-radius:10px;padding:18px;font-size:14px;color:#8a8278;line-height:1.9">
+          📲 Contáctanos para activar o renovar<br>
           <strong style="color:#f5a623;font-size:15px">ViProtein</strong>
         </div>
       </div>
@@ -1743,7 +1860,10 @@ function mostrarBloqueo(tipo) {
 // =====================
 // BOOT
 // =====================
-if (checkLicencia()) init();
+(async () => {
+  const ok = await checkLicencia();
+  if (ok) init();
+})();
 </script>
 </body>
 </html>
